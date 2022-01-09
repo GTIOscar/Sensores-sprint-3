@@ -1,0 +1,579 @@
+// Incluimos las librerias
+#include <Wire.h>
+#include <Adafruit_ADS1X15.h>
+#include <ESP8266WiFi.h>
+
+//Libreria GPS
+#include <SoftwareSerial.h>
+#include "TinyGPS++.h"
+
+Adafruit_ADS1115 ads1115; // construimos el ads1115 en la direccion 0x48
+
+TinyGPSPlus gpsp;//variable para la utilizacion de librerias tinyGPS++
+SoftwareSerial gps(12, 13); //pines utilizados en el GPS
+
+volatile byte interruptCont = 0; //para el uso del wake on motion del acelerometro
+
+// Definicion de parametros de configuracion del acelerometro
+
+#define    MPU9250_ADDRESS            0x68
+#define    MAG_ADDRESS                0x0C
+
+#define    ACC_FULL_SCALE_2_G        0x00
+#define    ACC_FULL_SCALE_4_G        0x08
+#define    ACC_FULL_SCALE_8_G        0x10
+#define    ACC_FULL_SCALE_16_G       0x18
+
+// Definicion del pin de interrupcion
+#define interruptPin  4
+
+// Declarar la funcion de lectura a traves del I2C (I2Cread)
+
+void I2Cread(uint8_t Address, uint8_t Register, uint8_t Nbytes, uint8_t* Data)
+{
+  Wire.beginTransmission(Address);
+  Wire.write(Register);
+  Wire.endTransmission();
+
+  Wire.requestFrom(Address, Nbytes);
+  uint8_t index = 0;
+  while (Wire.available())
+    Data[index++] = Wire.read();
+}
+
+// Declarar la funcion de escritura a traves del I2C (I2CwirteByte)
+
+void I2CwriteByte(uint8_t Address, uint8_t Register, uint8_t Data)
+{
+  Wire.beginTransmission(Address);
+  Wire.write(Register);
+  Wire.write(Data);
+  Wire.endTransmission();
+}
+
+// Declarar la funcion que maneja la interrupcion (handleInterrupt)
+
+void ICACHE_RAM_ATTR handleInterrupt()
+{
+ // Declarar aqui las instrucciones de la interrupcion
+ interruptCont++;
+}
+
+const int AirValue = 22400;  // Medimos valor en seco
+const int WaterValue = 10000;  // Medimos valor en agua
+const int LackSaultValue = 22400;// Medimos valor sin sal
+const int SalinityValue = 25800;// Medimos valor com mucha sal en taza
+float b = 0.786;
+float m = 0.0347;
+float desviacion = 2.5;
+const int sleepTimeS = 1;
+
+// coeficientes para la ecuacion lineal del sensor de temperatura T=((Vo-b)/m)+desviacion
+
+int salinity_power_pin = 5; //llamamos salinity_power_pin al pin 5
+
+
+//--------------------------------------------------------------------------------------------------------------------------------------------------------------
+// Comentar/Descomentar para ver mensajes de depuracion en monitor serie y/o respuesta del HTTP server
+#define PRINT_DEBUG_MESSAGES
+//#define PRINT_HTTP_RESPONSE
+
+// Comentar/Descomentar para conexion Fuera/Dentro de UPV
+//#define WiFi_CONNECTION_UPV
+
+// Selecciona que servidor REST quieres utilizar entre ThingSpeak y Dweet
+#define REST_SERVER_THINGSPEAK //Selecciona tu canal para ver los datos en la web (https://thingspeak.com/channels/360979)
+//#define REST_SERVER_DWEET //Selecciona tu canal para ver los datos en la web (http://dweet.io/follow/PruebaGTI)
+
+//////////////////////////////////////////////////////
+/////////////// WiFi Definitions /////////////////////
+//////////////////////////////////////////////////////
+
+#ifdef WiFi_CONNECTION_UPV //Conexion UPV
+const char WiFiSSID[] = "GTI1";
+const char WiFiPSK[] = "1PV.arduino.Toledo";
+#else //Conexion fuera de la UPV
+const char WiFiSSID[] = "Doca-z";
+const char WiFiPSK[] = "Pepensiblls";
+#endif
+
+///////////////////////////////////////////////////////
+/////////////// SERVER Definitions ////////////////////
+///////////////////////////////////////////////////////
+
+#if defined(WiFi_CONNECTION_UPV) //Conexion UPV
+const char Server_Host[] = "proxy.upv.es";
+const int Server_HttpPort = 8080;
+#elif defined(REST_SERVER_THINGSPEAK) //Conexion fuera de la UPV
+const char Server_Host[] = "api.thingspeak.com";
+const int Server_HttpPort = 80;
+#else
+const char Server_Host[] = "dweet.io";
+const int Server_HttpPort = 80;
+#endif
+
+WiFiClient client;
+
+/////////////////////////////////////////////////////
+/////////////// HTTP REST Connection ////////////////
+/////////////////////////////////////////////////////
+
+#ifdef REST_SERVER_THINGSPEAK
+const char Rest_Host[] = "api.thingspeak.com";
+String MyWriteAPIKey = "U9J2QPE8PVLKWLJV"; // Escribe la clave de tu canal ThingSpeak - ALEX
+//String MyWriteAPIKey="Q4KUZ1HQEV21LEIG"; // Escribe la clave de tu canal ThingSpeak - ASUN
+#else
+const char Rest_Host[] = "dweet.io";
+String MyWriteAPIKey = "cdiocurso2021g03"; // Escribe la clave de tu canal Dweet
+#endif
+
+#define NUM_FIELDS_TO_SEND 4 //Numero de medidas a enviar al servidor REST (Entre 1 y 8)
+
+/////////////////////////////////////////////////////
+/////////////// Pin Definitions /////////////////////
+/////////////////////////////////////////////////////
+
+const int LED_PIN = 4; // Thing's onboard, green LED
+
+////////////////////////////////////////////////////
+/////////////// WiFi Connection ////////////////////
+////////////////////////////////////////////////////
+
+void connectWiFi()
+{
+  byte ledStatus = LOW;
+
+#ifdef PRINT_DEBUG_MESSAGES
+  Serial.print("MAC: ");
+  Serial.println(WiFi.macAddress());
+#endif
+
+  WiFi.begin(WiFiSSID, WiFiPSK);
+
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    // Blink the LED
+    digitalWrite(LED_PIN, ledStatus); // Write LED high/low
+    ledStatus = (ledStatus == HIGH) ? LOW : HIGH;
+#ifdef PRINT_DEBUG_MESSAGES
+    Serial.println(".");
+#endif
+    delay(500);
+  }
+#ifdef PRINT_DEBUG_MESSAGES
+  Serial.println( "WiFi Connected" );
+  Serial.println(WiFi.localIP()); // Print the IP address
+#endif
+}
+
+/////////////////////////////////////////////////////
+/////////////// HTTP POST  ThingSpeak////////////////
+//////////////////////////////////////////////////////
+
+void HTTPPost(String fieldData[], int numFields) {
+
+  // Esta funcion construye el string de datos a enviar a ThingSpeak mediante el metodo HTTP POST
+  // La funcion envia "numFields" datos, del array fieldData.
+  // Asegurate de ajustar numFields al número adecuado de datos que necesitas enviar y activa los campos en tu canal web
+
+  if (client.connect( Server_Host , Server_HttpPort )) {
+
+    // Construimos el string de datos. Si tienes multiples campos asegurate de no pasarte de 1440 caracteres
+
+    String PostData = "api_key=" + MyWriteAPIKey ;
+    for ( int field = 1; field < (numFields + 1); field++ ) {
+      PostData += "&field" + String( field ) + "=" + fieldData[ field ];
+    }
+
+    // POST data via HTTP
+#ifdef PRINT_DEBUG_MESSAGES
+    Serial.println( "Connecting to ThingSpeak for update..." );
+#endif
+    client.println( "POST http://" + String(Rest_Host) + "/update HTTP/1.1" );
+    client.println( "Host: " + String(Rest_Host) );
+    client.println( "Connection: close" );
+    client.println( "Content-Type: application/x-www-form-urlencoded" );
+    client.println( "Content-Length: " + String( PostData.length() ) );
+    client.println();
+    client.println( PostData );
+#ifdef PRINT_DEBUG_MESSAGES
+    Serial.println( PostData );
+    Serial.println();
+    //Para ver la respuesta del servidor
+#ifdef PRINT_HTTP_RESPONSE
+    delay(500);
+    Serial.println();
+    while (client.available()) {
+      String line = client.readStringUntil('\r');
+      Serial.print(line);
+    }
+    Serial.println();
+    Serial.println();
+#endif
+#endif
+  }
+}
+
+//////////////////////////////////////////
+/////////////// HTTP GET  ////////////////
+//////////////////////////////////////////
+
+void HTTPGet(String fieldData[], int numFields) {
+
+  // Esta funcion construye el string de datos a enviar a ThingSpeak o Dweet mediante el metodo HTTP GET
+  // La funcion envia "numFields" datos, del array fieldData.
+  // Asegurate de ajustar "numFields" al número adecuado de datos que necesitas enviar y activa los campos en tu canal web
+
+  if (client.connect( Server_Host , Server_HttpPort )) {
+#ifdef REST_SERVER_THINGSPEAK
+    String PostData = "GET https://api.thingspeak.com/update?api_key=";
+    PostData = PostData + MyWriteAPIKey ;
+#else
+    String PostData = "GET http://dweet.io/dweet/for/";
+    PostData = PostData + MyWriteAPIKey + "?" ;
+#endif
+
+    for ( int field = 1; field < (numFields + 1); field++ ) {
+      PostData += "&field" + String( field ) + "=" + fieldData[ field ];
+    }
+
+#ifdef PRINT_DEBUG_MESSAGES
+    Serial.println( "Connecting to Server for update..." );
+#endif
+    client.print(PostData);
+    client.println(" HTTP/1.1");
+    client.println("Host: " + String(Rest_Host));
+    client.println("Connection: close");
+    client.println();
+#ifdef PRINT_DEBUG_MESSAGES
+    Serial.println( PostData );
+    Serial.println();
+    //Para ver la respuesta del servidor
+#ifdef PRINT_HTTP_RESPONSE
+    delay(500);
+    Serial.println();
+    while (client.available()) {
+      String line = client.readStringUntil('\r');
+      Serial.print(line);
+    }
+    Serial.println();
+    Serial.println();
+#endif
+#endif
+  }
+}
+
+void setup() {
+
+  pinMode(LED_PIN, OUTPUT);
+  connectWiFi();
+  digitalWrite(LED_PIN, HIGH);
+
+#ifdef PRINT_DEBUG_MESSAGES
+  Serial.print("Server_Host: ");
+  Serial.println(Server_Host);
+  Serial.print("Port: ");
+  Serial.println(String( Server_HttpPort ));
+  Serial.print("Server_Rest: ");
+  Serial.println(Rest_Host);
+#endif
+
+// Inicializar la comunicación por el bus I2C
+  Wire.begin();
+  
+  Serial.begin(9600); // inicializamos el monitor serie y ponemos la velocidad a la que trabajará
+  
+  ads1115.begin(); // inicializa el ads1115
+  //Serial.println("Ajustando la ganancia...");
+
+  ads1115.setGain(GAIN_ONE); //ponemos la ganancia one del adc que es la de 4.096V
+  //Serial.println("Tomando medidas del canal AIN0");
+
+  //Serial.println("Rango del ADC: +/- 4.096V (1 bit=2mV)");
+  pinMode(salinity_power_pin, OUTPUT); //configuramos el pin5 como salida
+
+  gps.begin(9600);
+
+  // Configurar acelerometro 
+  I2CwriteByte(MPU9250_ADDRESS, 28, ACC_FULL_SCALE_16_G);
+
+  // Configurar el modo Wake on Motion
+  I2CwriteByte(0x68,0x6B,0x00);
+  I2CwriteByte(0x68,0x6C,0x07); 
+  I2CwriteByte(0x68,0x1D,0x09);
+  I2CwriteByte(0x68,0x38,0x40);
+  I2CwriteByte(0x68,0x69,0xA0);
+  I2CwriteByte(0x68,0x1F,0x08);
+  I2CwriteByte(0x68,0x6B,0x03);
+  I2CwriteByte(0x68,0x6B,0x40);
+
+  // Configurar el pin por el que introduciremos la interrupcion+
+  pinMode(interruptPin, INPUT_PULLUP);
+  
+  
+  // Asociar la interrupcion a la funcion que la maneja
+  attachInterrupt(digitalPinToInterrupt(interruptPin),handleInterrupt, FALLING);
+}
+
+//----------------------------------------------------------------------------------------------------------------------------------------------------
+
+int medida_humedad() {//funcion para la medida de humedad
+
+  int16_t adc0;
+  int16_t humedad; //declaramos variables
+
+  adc0 = ads1115.readADC_SingleEnded(0);// el valor que recoja el sensor se almacenará en la variable adc0
+  humedad = 100 * AirValue / (AirValue - WaterValue) - adc0 * 100 / (AirValue - WaterValue); // algoritmo para calcular el porcentaje de humedad
+
+  if (humedad > 100) {  //condiciones para arreglar el algoritmo cuando dé valores negativos o superiores a 100
+    humedad = 100;
+  }
+
+  if (humedad < 0) {
+    humedad = 0;
+  }
+  Serial.println(adc0);
+  return humedad;// devolvemos el valor de humedad al loop
+}
+
+//-----------------------------------------------------------------------------------------------------------------------------------------------------------
+
+int medida_salinidad() {//funcion para la medida de salinidad
+
+  int adc1;
+  int input_pin = 5;
+  int sal;
+  int salinity_input_pin = 5; //declaracion de variables
+
+  digitalWrite( salinity_power_pin, HIGH );// valor alto a la señal para la medicion del movimiento de iones en el agua
+
+  adc1 = ads1115.readADC_SingleEnded(1);// entrada selecionada la 1 comunicanose con nuestra placa
+
+  sal = 100 * LackSaultValue / (LackSaultValue - SalinityValue) - adc1 * 100 / (LackSaultValue - SalinityValue); //formula para sacar porcentaje,(algoritmo)
+
+  if (sal > 100) {   // estas son unas condiciones para arreglar cuando el algoritmo dé porcentajes negativos o mayores que 100
+    sal = 100;
+  }
+  if (sal < 0) {
+    sal = 0;
+  }
+
+  digitalWrite( salinity_power_pin, LOW );//damos un valor Low a la señal de pulso
+
+  return sal;//devolvemos el valor de sal al loop
+}
+//-------------------------------------------------------------------------------------------------------
+float medida_temperatura() { // funcion para la medida de temperatura
+  int adc2;
+  float temperatura;
+  float tension;// declaracion de variables
+
+  adc2 = (ads1115.readADC_SingleEnded(2));// entrada selecionada la 2 comunicanose con nuestra placa
+  tension = (4.096 * adc2) / 32767;// factor de conversión para obtener la tension de salida
+  temperatura = ((tension - b) / m) + desviacion;// algoritmo para obtener la temperatura (recta de calibracion)
+
+  return temperatura;//devolvemos el valor de "temperatura" al loop
+}
+//----------------------------------------------------------------------------------------
+int medida_iluminacion() {//funcion para la medida de salinidad
+
+  int adc3;
+
+  adc3 = ads1115.readADC_SingleEnded(3);// entrada seleccionada la 3 comunicanose con nuestra placa
+  return adc3;
+}
+//--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+void gpsDatos(){
+while (gps.available() > 0)
+    gpsp.encode(gps.read());
+
+    //float latitud=0;
+    //float longitud=0;
+    //int altitud=0;
+
+    if (gpsp.location.isUpdated())
+  {
+    //latitud=gpsp.location.lat();
+    //longitud=gpsp.location.lng();
+    //altitud=gpsp.altitude.meters();
+    Serial.print("LATITUD= "); Serial.println(gpsp.location.lat(), 6);
+    Serial.print("LONGITUD= "); Serial.println(gpsp.location.lng(), 6);
+    Serial.print("ALTITUD= "); Serial.print(gpsp.altitude.meters());Serial.println("m");
+    Serial.println("--------------------------------------------------");
+  }
+}
+
+void loop() {
+
+  //declaramos las variables
+  int humedad;
+  int sal;
+  float temperatura;
+  int luminosidad;
+  uint8_t Buf[14];
+  int FS_ACC = 16;
+
+  temperatura = medida_temperatura();// llamada a la funcion medida_temperatura
+  humedad = medida_humedad();// llamada a la funcion medida_humedad
+  sal = medida_salinidad();//llamada a la funcion medida_salinidad
+  luminosidad = medida_iluminacion();//llamada a la funcion medida_iluminacion
+  //gpsDatos();
+
+  //-------------------------------------------------------------------------------------------
+
+  // Parametros establecidos
+
+  if (luminosidad >= 28000) {
+    Serial.println("Sol intenso");
+  }
+  if (luminosidad >= 14001 && luminosidad <= 27999) {
+    Serial.println("Dia natural sin nubes");
+  }
+  if (luminosidad >= 401 && luminosidad <= 14000) {
+    Serial.println("Nublado");
+  }
+  if (luminosidad <= 400 && luminosidad >= 101 ) {
+    Serial.println("practicamente sin luz");
+  }
+  if (luminosidad <= 100) {
+    Serial.println("Oscuridad maxima");
+  }
+
+  int porcentajeLum = (luminosidad * 100) / 28000;
+  Serial.println("------------------ porcentaje");
+  Serial.println(luminosidad);
+
+  if (porcentajeLum > 100)
+    porcentajeLum = 100;
+
+  if (porcentajeLum < 0)
+    porcentajeLum = 0;
+
+  Serial.println(porcentajeLum);
+  Serial.println("---------------");
+delay(1000);
+
+  while (gps.available() > 0)
+    gpsp.encode(gps.read());
+
+    //float latitud=0;
+    //float longitud=0;
+    //int altitud=0;
+
+    if (gpsp.location.isUpdated())
+  {
+    //latitud=gpsp.location.lat();
+    //longitud=gpsp.location.lng();
+    //altitud=gpsp.altitude.meters();
+    Serial.print("LATITUD= "); Serial.println(gpsp.location.lat(), 6);
+    Serial.print("LONGITUD= "); Serial.println(gpsp.location.lng(), 6);
+    Serial.print("ALTITUD= "); Serial.print(gpsp.altitude.meters());Serial.println("m");
+    Serial.println("--------------------------------------------------");
+  }
+
+  I2Cread(MPU9250_ADDRESS, 0x3B, 14, Buf);
+
+  float ax = (Buf[0] << 8 | Buf[1]);
+  float ay = (Buf[2] << 8 | Buf[3]);
+  float az = Buf[4] << 8 | Buf[5];
+
+  ax = ax*FS_ACC/32768-32 ;
+  ay = ay*FS_ACC/32768-31.99 ;
+  az = az*FS_ACC/32768+0.04 ;
+
+  Serial.println(interruptCont);
+  
+ // Si se da la interrupción poner un mensaje en el monitor serie
+ if(interruptCont>0){
+   Serial.println("Lectura Acelerometro");
+   Serial.print("AX=");
+   Serial.print(ax, 2);
+   Serial.print("g");
+   Serial.print("\t");
+   Serial.print("AY=");
+   Serial.print(ay, 2);
+   Serial.print("g");
+   Serial.print("\t");
+   Serial.print("AZ=");
+   Serial.print(az, 2);
+   Serial.println("g");
+   interruptCont--;
+ }
+ delay(1000); 
+  
+  /*
+    //-----------------------------------------------------------------------------------------------temperatura
+    Serial.print("Temperatura: ");
+    Serial.print(temperatura, 1); //este es el resultado de el algoritmo
+    Serial.println("ºC");
+
+    //---------------------------------------------------------------------------------------------humedad
+    Serial.print("Porcentaje de humedad (%): ");  //Porcentaje que se muestra en el monitor serie
+    Serial.print(humedad);//resultado de la funcion medida_humedad
+    Serial.println("%");
+
+    //------------------------------------------------------salinidad
+    Serial.print("Porcentaje de salinidad (%):"); //Esto es el porcentaje que se muestra en el monitor serie
+
+
+
+    Serial.print(sal);//este es el resultado de el algoritmo
+    Serial.println("%");
+    Serial.println("-----------------------");
+
+    delay(2000);// tiempo de espera
+  */
+  String data[ NUM_FIELDS_TO_SEND + 1];  // Podemos enviar hasta 8 datos
+
+  data[ 1 ] = String( humedad ); //Escribimos el dato 1. Recuerda actualizar numFields
+#ifdef PRINT_DEBUG_MESSAGES
+  Serial.print( "Humedad = " );
+  Serial.println( data[ 1 ] );
+#endif
+
+  data[ 2 ] = String( sal ); //Escribimos el dato 2. Recuerda actualizar numFields
+#ifdef PRINT_DEBUG_MESSAGES
+  Serial.print( "Salinidad = " );
+  Serial.println( data[ 2 ] );
+#endif
+
+  data[ 3 ] = String( temperatura ); //Escribimos el dato 3. Recuerda actualizar numFields
+#ifdef PRINT_DEBUG_MESSAGES
+  Serial.print( "Temperatura = " );
+  Serial.println( data[ 3 ] );
+#endif
+
+  data[ 4 ] = String( porcentajeLum ); //Escribimos el dato 4. Recuerda actualizar numFields
+#ifdef PRINT_DEBUG_MESSAGES
+  Serial.print( "Luminosidad = " );
+  Serial.println( data[ 4 ] );
+#endif
+/*
+data[ 5 ] = String( longitud ); //Escribimos el dato 5. Recuerda actualizar numFields
+#ifdef PRINT_DEBUG_MESSAGES
+  Serial.print( "Latitud = " );
+  Serial.println( data[ 5 ] );
+#endif
+
+data[ 6 ] = String( latitud ); //Escribimos el dato 6. Recuerda actualizar numFields
+#ifdef PRINT_DEBUG_MESSAGES
+  Serial.print( "Longitud = " );
+  Serial.println( data[ 6 ] );
+#endif
+
+data[ 7 ] = String( altitud ); //Escribimos el dato 7. Recuerda actualizar numFields
+#ifdef PRINT_DEBUG_MESSAGES
+  Serial.print( "Altitud = " );
+  Serial.println( data[ 7 ] );
+#endif
+*/
+  //Selecciona si quieres enviar con GET(ThingSpeak o Dweet) o con POST(ThingSpeak)
+  HTTPPost( data, NUM_FIELDS_TO_SEND );
+  //HTTPGet( data, NUM_FIELDS_TO_SEND );
+delay(1000);
+  Serial.println("ESP8266 in sleep mode");
+  ESP.deepSleep(sleepTimeS * 1000);
+  Serial.println("-----------------------");
+
+}
