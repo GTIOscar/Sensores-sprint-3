@@ -127,7 +127,7 @@ const char Rest_Host[] = "dweet.io";
 String MyWriteAPIKey = "cdiocurso2021g03"; // Escribe la clave de tu canal Dweet
 #endif
 
-#define NUM_FIELDS_TO_SEND 4 //Numero de medidas a enviar al servidor REST (Entre 1 y 8)
+#define NUM_FIELDS_TO_SEND 5 //Numero de medidas a enviar al servidor REST (Entre 1 y 8)
 
 /////////////////////////////////////////////////////
 /////////////// Pin Definitions /////////////////////
@@ -302,10 +302,10 @@ void setup() {
   I2CwriteByte(0x68,0x6C,0x07); 
   I2CwriteByte(0x68,0x1D,0x09);
   I2CwriteByte(0x68,0x38,0x40);
-  I2CwriteByte(0x68,0x69,0xA0);
+  I2CwriteByte(0x68,0x69,0xC0);
   I2CwriteByte(0x68,0x1F,0x08);
-  I2CwriteByte(0x68,0x6B,0x03);
-  I2CwriteByte(0x68,0x6B,0x40);
+  I2CwriteByte(0x68,0x1E,0x06);
+  I2CwriteByte(0x68,0x6B,0x20);
 
   // Configurar el pin por el que introduciremos la interrupcion+
   pinMode(interruptPin, INPUT_PULLUP);
@@ -317,12 +317,12 @@ void setup() {
 
 //----------------------------------------------------------------------------------------------------------------------------------------------------
 
-int medida_humedad() {//funcion para la medida de humedad
+int medida_humedad(int posicion) {//funcion para la medida de humedad
 
   int16_t adc0;
   int16_t humedad; //declaramos variables
 
-  adc0 = ads1115.readADC_SingleEnded(0);// el valor que recoja el sensor se almacenará en la variable adc0
+  adc0 = ads1115.readADC_SingleEnded(posicion);// el valor que recoja el sensor se almacenará en la variable adc0
   humedad = 100 * AirValue / (AirValue - WaterValue) - adc0 * 100 / (AirValue - WaterValue); // algoritmo para calcular el porcentaje de humedad
 
   if (humedad > 100) {  //condiciones para arreglar el algoritmo cuando dé valores negativos o superiores a 100
@@ -338,7 +338,7 @@ int medida_humedad() {//funcion para la medida de humedad
 
 //-----------------------------------------------------------------------------------------------------------------------------------------------------------
 
-int medida_salinidad() {//funcion para la medida de salinidad
+int medida_salinidad(int posicion) {//funcion para la medida de salinidad
 
   int adc1;
   int input_pin = 5;
@@ -347,7 +347,7 @@ int medida_salinidad() {//funcion para la medida de salinidad
 
   digitalWrite( salinity_power_pin, HIGH );// valor alto a la señal para la medicion del movimiento de iones en el agua
 
-  adc1 = ads1115.readADC_SingleEnded(1);// entrada selecionada la 1 comunicanose con nuestra placa
+  adc1 = ads1115.readADC_SingleEnded(posicion);// entrada selecionada la 1 comunicanose con nuestra placa
 
   sal = 100 * LackSaultValue / (LackSaultValue - SalinityValue) - adc1 * 100 / (LackSaultValue - SalinityValue); //formula para sacar porcentaje,(algoritmo)
 
@@ -363,23 +363,23 @@ int medida_salinidad() {//funcion para la medida de salinidad
   return sal;//devolvemos el valor de sal al loop
 }
 //-------------------------------------------------------------------------------------------------------
-float medida_temperatura() { // funcion para la medida de temperatura
+float medida_temperatura(int posicion) { // funcion para la medida de temperatura
   int adc2;
   float temperatura;
   float tension;// declaracion de variables
 
-  adc2 = (ads1115.readADC_SingleEnded(2));// entrada selecionada la 2 comunicanose con nuestra placa
+  adc2 = (ads1115.readADC_SingleEnded(posicion));// entrada selecionada la 2 comunicanose con nuestra placa
   tension = (4.096 * adc2) / 32767;// factor de conversión para obtener la tension de salida
   temperatura = ((tension - b) / m) + desviacion;// algoritmo para obtener la temperatura (recta de calibracion)
 
   return temperatura;//devolvemos el valor de "temperatura" al loop
 }
 //----------------------------------------------------------------------------------------
-int medida_iluminacion() {//funcion para la medida de salinidad
+int medida_iluminacion(int posicion) {//funcion para la medida de salinidad
 
   int adc3;
 
-  adc3 = ads1115.readADC_SingleEnded(3);// entrada seleccionada la 3 comunicanose con nuestra placa
+  adc3 = ads1115.readADC_SingleEnded(posicion);// entrada seleccionada la 3 comunicanose con nuestra placa
   return adc3;
 }
 //--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -414,10 +414,10 @@ void loop() {
   uint8_t Buf[14];
   int FS_ACC = 16;
 
-  temperatura = medida_temperatura();// llamada a la funcion medida_temperatura
-  humedad = medida_humedad();// llamada a la funcion medida_humedad
-  sal = medida_salinidad();//llamada a la funcion medida_salinidad
-  luminosidad = medida_iluminacion();//llamada a la funcion medida_iluminacion
+  temperatura = medida_temperatura(2);// llamada a la funcion medida_temperatura
+  humedad = medida_humedad(0);// llamada a la funcion medida_humedad
+  sal = medida_salinidad(1);//llamada a la funcion medida_salinidad
+  luminosidad = medida_iluminacion(3);//llamada a la funcion medida_iluminacion
   //gpsDatos();
 
   //-------------------------------------------------------------------------------------------
@@ -501,29 +501,7 @@ delay(1000);
    interruptCont--;
  }
  delay(1000); 
-  
-  /*
-    //-----------------------------------------------------------------------------------------------temperatura
-    Serial.print("Temperatura: ");
-    Serial.print(temperatura, 1); //este es el resultado de el algoritmo
-    Serial.println("ºC");
-
-    //---------------------------------------------------------------------------------------------humedad
-    Serial.print("Porcentaje de humedad (%): ");  //Porcentaje que se muestra en el monitor serie
-    Serial.print(humedad);//resultado de la funcion medida_humedad
-    Serial.println("%");
-
-    //------------------------------------------------------salinidad
-    Serial.print("Porcentaje de salinidad (%):"); //Esto es el porcentaje que se muestra en el monitor serie
-
-
-
-    Serial.print(sal);//este es el resultado de el algoritmo
-    Serial.println("%");
-    Serial.println("-----------------------");
-
-    delay(2000);// tiempo de espera
-  */
+ 
   String data[ NUM_FIELDS_TO_SEND + 1];  // Podemos enviar hasta 8 datos
 
   data[ 1 ] = String( humedad ); //Escribimos el dato 1. Recuerda actualizar numFields
@@ -549,13 +527,13 @@ delay(1000);
   Serial.print( "Luminosidad = " );
   Serial.println( data[ 4 ] );
 #endif
-/*
-data[ 5 ] = String( longitud ); //Escribimos el dato 5. Recuerda actualizar numFields
+
+data[ 5 ] = String( interruptCont ); //Escribimos el dato 5. Recuerda actualizar numFields
 #ifdef PRINT_DEBUG_MESSAGES
-  Serial.print( "Latitud = " );
+  Serial.print( "Despierto = " );
   Serial.println( data[ 5 ] );
 #endif
-
+/*
 data[ 6 ] = String( latitud ); //Escribimos el dato 6. Recuerda actualizar numFields
 #ifdef PRINT_DEBUG_MESSAGES
   Serial.print( "Longitud = " );
